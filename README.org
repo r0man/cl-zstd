@@ -20,7 +20,7 @@ for details.
 
 *cl-zstd* requires:
  - [[https://cffi.common-lisp.dev/][cffi]]
- - [[https://github.com/glv2/cl-octet-streams][cl-octet-streams]]
+ - [[https://codeberg.org/glv/cl-octet-streams][cl-octet-streams]]
  - [[https://facebook.github.io/zstd/][libzstd]]
  - [[https://trivial-gray-streams.common-lisp.dev/][trivial-gray-streams]]
 
