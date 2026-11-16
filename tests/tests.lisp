@@ -179,3 +179,58 @@
 (test compress-bad-options
   (signals zstd-error (compress-buffer #(7 6 6 7 6 6) :level nil))
   (signals zstd-error (compress-buffer #(7 6 6 7 6 6) :level 200)))
+
+
+;;; The compressing and decompressing streams hand libzstd the addresses
+;;; of Lisp vectors. A moving garbage collector may relocate those
+;;; vectors between two calls into libzstd, so these tests force a full
+;;; GC between writes and reads and check that the data still survives a
+;;; round trip.
+
+(defun full-gc ()
+  #+sbcl (sb-ext:gc :full t)
+  #+ccl (ccl:gc)
+  #+ecl (ext:gc t)
+  #+clisp (ext:gc)
+  #+lispworks (hcl:gc-generation t)
+  #+allegro (excl:gc t))
+
+(defun make-test-data (size)
+  "Return SIZE deterministic pseudo-random octets drawn from a small
+alphabet, so that the data is compressible but not trivial."
+  (let ((data (make-array size :element-type '(unsigned-byte 8)))
+        (state 12345))
+    (dotimes (i size data)
+      (setf state (mod (+ (* state 1103515245) 12345) 2147483648))
+      (setf (aref data i) (+ 97 (mod (ash state -16) 16))))))
+
+(test compressing-stream-with-gc
+  (let* ((data (make-test-data 524288))
+         (chunk-size 16384)
+         (compressed (with-octet-output-stream (output)
+                       (with-compressing-stream (stream output)
+                         (loop :for start :from 0 :below (length data)
+                                 :by chunk-size
+                               :do (full-gc)
+                                   (write-sequence data stream
+                                                   :start start
+                                                   :end (+ start chunk-size)))
+                         (full-gc)))))
+    (is-false (mismatch data (handler-case (decompress-buffer compressed)
+                               (zstd-error () #()))))))
+
+(test decompressing-stream-with-gc
+  (let* ((data (make-test-data 524288))
+         (compressed (compress-buffer data))
+         (result (make-array (length data) :element-type '(unsigned-byte 8)))
+         (chunk-size 16384))
+    (handler-case
+        (with-octet-input-stream (input compressed)
+          (with-decompressing-stream (stream input)
+            (loop :for start :from 0 :below (length result) :by chunk-size
+                  :do (full-gc)
+                      (read-sequence result stream
+                                     :start start
+                                     :end (+ start chunk-size)))))
+      (zstd-error () nil))
+    (is-false (mismatch data result))))
