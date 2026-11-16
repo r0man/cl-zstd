@@ -32,6 +32,31 @@
 
 
 ;;;
+;;; Buffer pinning
+;;;
+
+(defmacro with-pinned-buffers ((input-buffer zstd-in-buffer
+                                output-buffer zstd-out-buffer)
+                               &body body)
+  "Pin INPUT-BUFFER and OUTPUT-BUFFER, point the SRC field of ZSTD-IN-BUFFER
+and the DST field of ZSTD-OUT-BUFFER at their data, and evaluate BODY.
+The address of a Lisp vector is valid only while the vector is pinned:
+the garbage collector may move it between two calls, so the addresses
+are set again for each call into libzstd."
+  (let ((src-pointer (gensym "SRC"))
+        (dst-pointer (gensym "DST")))
+    `(cffi:with-pointer-to-vector-data (,src-pointer ,input-buffer)
+       (cffi:with-pointer-to-vector-data (,dst-pointer ,output-buffer)
+         (setf (cffi:foreign-slot-value ,zstd-in-buffer
+                                        '(:struct zstd-in-buffer) 'src)
+               ,src-pointer)
+         (setf (cffi:foreign-slot-value ,zstd-out-buffer
+                                        '(:struct zstd-out-buffer) 'dst)
+               ,dst-pointer)
+         ,@body))))
+
+
+;;;
 ;;; Compression Gray streams
 ;;;
 
@@ -51,10 +76,12 @@
                input-buffer zstd-in-buffer
                output-buffer zstd-out-buffer)
       stream
-    (zstd-check (zstd-compress-stream2 zstd-context
-                                       zstd-out-buffer
-                                       zstd-in-buffer
-                                       :zstd-e-continue))
+    (with-pinned-buffers (input-buffer zstd-in-buffer
+                          output-buffer zstd-out-buffer)
+      (zstd-check (zstd-compress-stream2 zstd-context
+                                         zstd-out-buffer
+                                         zstd-in-buffer
+                                         :zstd-e-continue)))
     (cffi:with-foreign-slots ((size pos) zstd-in-buffer
                               (:struct zstd-in-buffer))
       (when (plusp pos)
@@ -92,16 +119,18 @@
   seq)
 
 (defmethod stream-finish-output ((stream compressing-stream))
-  (with-slots (output-stream zstd-context zstd-in-buffer
+  (with-slots (output-stream zstd-context input-buffer zstd-in-buffer
                output-buffer zstd-out-buffer)
       stream
     (do ((frame-complete-p nil))
         (frame-complete-p)
       (setf frame-complete-p
-            (zerop (zstd-check (zstd-compress-stream2 zstd-context
-                                                      zstd-out-buffer
-                                                      zstd-in-buffer
-                                                      :zstd-e-end))))
+            (with-pinned-buffers (input-buffer zstd-in-buffer
+                                  output-buffer zstd-out-buffer)
+              (zerop (zstd-check (zstd-compress-stream2 zstd-context
+                                                        zstd-out-buffer
+                                                        zstd-in-buffer
+                                                        :zstd-e-end)))))
       (cffi:with-foreign-slots ((pos) zstd-out-buffer
                                 (:struct zstd-out-buffer))
         (when (plusp pos)
@@ -205,7 +234,7 @@ returned."
 
 (defun read-and-decompress (stream)
   (with-slots (input-stream zstd-context input-buffer zstd-in-buffer
-               zstd-out-buffer frame-complete-p)
+               output-buffer zstd-out-buffer frame-complete-p)
       stream
     (let ((end-of-input-p nil))
       (cffi:with-foreign-slots ((size) zstd-in-buffer
@@ -214,9 +243,11 @@ returned."
         (setf end-of-input-p (zerop size)))
       (unless end-of-input-p
         (setf frame-complete-p
-              (zerop (zstd-check (zstd-decompress-stream zstd-context
-                                                         zstd-out-buffer
-                                                         zstd-in-buffer))))
+              (with-pinned-buffers (input-buffer zstd-in-buffer
+                                    output-buffer zstd-out-buffer)
+                (zerop (zstd-check (zstd-decompress-stream zstd-context
+                                                           zstd-out-buffer
+                                                           zstd-in-buffer)))))
         (cffi:with-foreign-slots ((size pos) zstd-in-buffer
                                   (:struct zstd-in-buffer))
           (when (plusp pos)
